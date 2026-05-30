@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SWARD - Lambda generación de alertas de riesgo académico
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.11
+    Environment:
+      Variables:
+        TRAZABILIDAD_DATABASE_URL: !Ref TrazabilidadDatabaseUrl
+        XAI_DATABASE_URL: !Ref XaiDatabaseUrl
+        LOG_LEVEL: INFO
+
+Parameters:
+  TrazabilidadDatabaseUrl:
+    Type: String
+    Description: URL de conexión a trazabilidad_db
+  XaiDatabaseUrl:
+    Type: String
+    Description: URL de conexión a xai_db
+
+Resources:
+  AlertasFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handler.lambda_handler
+      Events:
+        RecomendacionGeneradaTrigger:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              detail-type:
+                - "sward.recomendacion.RecomendacionGenerada"

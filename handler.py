@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,8 @@ def handle_event(event: dict, context) -> dict:
         logger.warning("Detail incompleto, se omite | detail=%s", detail)
         return {"alertas_creadas": 0}
 
+    event_id = _extraer_event_id(event, detail)
+
     riesgo = _consultar_riesgo(estudiante_id, curso_id)
     if riesgo is None:
         logger.info(
@@ -46,15 +49,43 @@ def handle_event(event: dict, context) -> dict:
         return {"alertas_creadas": 0}
 
     mensaje = _construir_mensaje(nivel_riesgo, riesgo.get("puntaje_promedio"))
-    _crear_alerta(estudiante_id, curso_id, nivel_riesgo, mensaje)
+    creada = _crear_alerta(estudiante_id, curso_id, nivel_riesgo, mensaje, event_id)
+
+    if not creada:
+        logger.info(
+            "Evento duplicado, omitido | event_id=%s | estudiante=%s | curso=%s",
+            event_id,
+            estudiante_id,
+            curso_id,
+        )
+        return {"alertas_creadas": 0}
 
     logger.info(
-        "Alerta de riesgo creada | estudiante=%s | curso=%s | nivel=%s",
+        "Alerta de riesgo creada | event_id=%s | estudiante=%s | curso=%s | nivel=%s",
+        event_id,
         estudiante_id,
         curso_id,
         nivel_riesgo,
     )
     return {"alertas_creadas": 1}
+
+
+def _extraer_event_id(event: dict, detail: dict) -> str:
+    """Obtiene el event_id del DomainEvent/EventEnvelope de sward-shared.
+
+    Busca primero en el detail (DomainEvent dentro de EventBridge) y luego en
+    el sobre del evento. Si no viaja en ningún sitio, genera uno determinístico
+    a partir del contenido para no romper el procesamiento.
+    """
+    event_id = detail.get("event_id") or event.get("event_id") or event.get("id")
+    if event_id:
+        return str(event_id)
+
+    logger.warning(
+        "Evento sin event_id, se genera uno determinístico | detail=%s", detail
+    )
+    base = json.dumps(detail, sort_keys=True, default=str)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, base))
 
 
 def _consultar_riesgo(estudiante_id: str, curso_id: str) -> dict | None:
@@ -79,12 +110,29 @@ def _consultar_riesgo(estudiante_id: str, curso_id: str) -> dict | None:
 
 
 def _crear_alerta(
-    estudiante_id: str, curso_id: str, nivel_riesgo: str, mensaje: str
-) -> None:
-    """Inserta una alerta en academic_alerts dentro de xai_db."""
+    estudiante_id: str,
+    curso_id: str,
+    nivel_riesgo: str,
+    mensaje: str,
+    event_id: str,
+) -> bool:
+    """Inserta una alerta en academic_alerts dentro de xai_db, con dedup atómico.
+
+    processed_events vive en xai_db (misma conexión que la alerta), por lo que
+    el dedup y el INSERT de la alerta son atómicos en una sola transacción.
+
+    Returns:
+        True  -> la alerta se creó (event_id nuevo).
+        False -> evento duplicado; no se creó ninguna alerta.
+    """
     from lib.db_client import get_connection
+    from lib.idempotency import ya_procesado
 
     with get_connection(XAI_DATABASE_URL) as conn:
+        if ya_procesado(conn, event_id):
+            conn.commit()
+            return False
+
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -102,6 +150,7 @@ def _crear_alerta(
                 ),
             )
         conn.commit()
+    return True
 
 
 def _construir_mensaje(nivel_riesgo: str, puntaje_promedio) -> str:

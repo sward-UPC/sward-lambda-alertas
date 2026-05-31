@@ -1,4 +1,10 @@
+"""Tests unitarios para sward-lambda-alertas.
+
+Trigger: EventBridge rule → evalúa riesgo académico
+"""
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from handler import handle_event
 

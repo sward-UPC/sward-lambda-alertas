@@ -2,6 +2,7 @@
 
 Trigger: EventBridge rule → evalúa riesgo académico
 """
+
 from unittest.mock import MagicMock, patch
 
 

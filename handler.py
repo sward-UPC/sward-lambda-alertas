@@ -7,8 +7,43 @@ from lib.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-TRAZABILIDAD_DATABASE_URL = os.environ.get("TRAZABILIDAD_DATABASE_URL", "")
-XAI_DATABASE_URL = os.environ.get("XAI_DATABASE_URL", "")
+
+def _resolve_db_url(
+    url_env: str, host_env: str, port_env: str, name_env: str, secret_arn_env: str
+) -> str:
+    """Retorna DATABASE_URL desde env directo o componentes + Secrets Manager."""
+    url = os.environ.get(url_env, "")
+    if url:
+        return url
+    host = os.environ.get(host_env, "")
+    port = os.environ.get(port_env, "5432")
+    name = os.environ.get(name_env, "")
+    secret_arn = os.environ.get(secret_arn_env, "")
+    if not (host and secret_arn):
+        return ""
+    import boto3
+
+    client = boto3.client(
+        "secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1")
+    )
+    secret = json.loads(client.get_secret_value(SecretId=secret_arn)["SecretString"])
+    return f"postgresql://{secret.get('username', '')}:{secret.get('password', '')}@{host}:{port}/{name}"
+
+
+TRAZABILIDAD_DATABASE_URL = _resolve_db_url(
+    "TRAZABILIDAD_DATABASE_URL",
+    "TRAZABILIDAD_DATABASE_HOST",
+    "TRAZABILIDAD_DATABASE_PORT",
+    "TRAZABILIDAD_DATABASE_NAME",
+    "TRAZABILIDAD_DB_SECRET_ARN",
+)
+XAI_DATABASE_URL = _resolve_db_url(
+    "XAI_DATABASE_URL",
+    "XAI_DATABASE_HOST",
+    "XAI_DATABASE_PORT",
+    "XAI_DATABASE_NAME",
+    "XAI_DB_SECRET_ARN",
+)
 
 NIVELES_RIESGO_ALERTA = {"alto", "critico"}
 
@@ -67,7 +102,51 @@ def handle_event(event: dict, context) -> dict:
         curso_id,
         nivel_riesgo,
     )
+
+    # Notifica al docente del curso (lo consume lambda-notificaciones, que
+    # resuelve el docente_id del curso y crea la notificación).
+    _publicar_alerta_creada(estudiante_id, curso_id, nivel_riesgo, mensaje, event_id)
+
     return {"alertas_creadas": 1}
+
+
+def _publicar_alerta_creada(
+    estudiante_id: str, curso_id: str, nivel_riesgo: str, mensaje: str, event_id: str
+) -> None:
+    """Publica `sward.alertas.AlertaCreada` en EventBridge (best-effort)."""
+    bus = os.environ.get("EVENTBRIDGE_BUS_NAME", "")
+    if not bus:
+        logger.warning(
+            "EVENTBRIDGE_BUS_NAME no configurado; no se publica AlertaCreada."
+        )
+        return
+    try:
+        import boto3
+
+        detail = {
+            "event_type": "sward.alertas.AlertaCreada",
+            "event_id": event_id,
+            "estudiante_id": estudiante_id,
+            "curso_id": curso_id,
+            "nivel_riesgo": nivel_riesgo,
+            "mensaje": mensaje,
+        }
+        client = boto3.client(
+            "events", region_name=os.environ.get("AWS_REGION", "us-east-1")
+        )
+        client.put_events(
+            Entries=[
+                {
+                    "Source": "sward-lambda-alertas",
+                    "DetailType": "sward.alertas.AlertaCreada",
+                    "Detail": json.dumps(detail),
+                    "EventBusName": bus,
+                }
+            ]
+        )
+    except Exception:
+        # No romper el procesamiento de la alerta si falla el publish.
+        logger.exception("No se pudo publicar AlertaCreada | event_id=%s", event_id)
 
 
 def _extraer_event_id(event: dict, detail: dict) -> str:
